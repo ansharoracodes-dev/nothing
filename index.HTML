@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ferrari Driver</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a1a; overflow: hidden; }
+    canvas { display: block; }
+    #hud {
+      position: absolute; top: 20px; left: 20px;
+      color: #00ff00; font-family: Arial, sans-serif; font-size: 15px;
+      background: rgba(0,0,0,0.75); padding: 12px 20px;
+      border-radius: 8px; line-height: 2; pointer-events: none;
+    }
+    #sensitivity-box {
+      position: absolute; top: 20px; right: 20px;
+      color: white; font-family: Arial, sans-serif; font-size: 14px;
+      background: rgba(0,0,0,0.75); padding: 12px 20px;
+      border-radius: 8px; line-height: 2;
+    }
+    #cache-banner {
+      position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+      color: #fff; font-family: Arial, sans-serif; font-size: 13px;
+      padding: 8px 20px; border-radius: 8px;
+      pointer-events: none; display: none; white-space: nowrap;
+    }
+    #info {
+      position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+      color: #ffffff66; font-family: Arial, sans-serif; font-size: 13px;
+      text-align: center; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="hud">⏳ Loading engine...</div>
+<div id="cache-banner"></div>
+<div id="sensitivity-box" style="display:none">
+  🎮 Sensitivity<br>
+  Turn Speed: <input type="range" id="turnSlider" min="1" max="10" value="4" style="width:100px"> <span id="turnVal">4</span><br>
+  Accel Speed: <input type="range" id="accelSlider" min="1" max="10" value="4" style="width:100px"> <span id="accelVal">4</span><br>
+  Camera Dist: <input type="range" id="camSlider" min="200" max="1500" value="600" style="width:100px"> <span id="camVal">600</span><br>
+  Mouse Sens: <input type="range" id="mouseSlider" min="1" max="10" value="3" style="width:100px"> <span id="mouseVal">3</span><br>
+  <button id="lockBtn" style="margin-top:8px;padding:6px 14px;background:#d4af37;border:none;border-radius:5px;cursor:pointer;font-weight:bold;">🖱️ Click to look around</button>
+</div>
+<div id="info">W=drive | S=brake | A=left | D=right | Click button to look around</div>
+
+<script>
+// ═══════════════════════════════════════════════
+//  CACHE CONFIG
+// ═══════════════════════════════════════════════
+const CACHE_NAME = 'ferrari-v1';
+
+const CDN_SCRIPTS = [
+  {
+    url: 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
+    key: 'three.min.js'
+  },
+  {
+    url: 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r128/examples/js/loaders/GLTFLoader.js',
+    key: 'GLTFLoader.js'
+  }
+];
+
+function setHUD(msg) {
+  document.getElementById('hud').innerText = msg;
+}
+
+function showBanner(msg, color) {
+  const el = document.getElementById('cache-banner');
+  el.innerText = msg;
+  el.style.background = color || 'rgba(0,130,0,0.9)';
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.display = 'none', 4000);
+}
+
+// ═══════════════════════════════════════════════
+//  STEP 1: Load a script — cache first, CDN fallback
+// ═══════════════════════════════════════════════
+async function loadScript(url, cacheKey) {
+  // FIX: Bypass Cache API if running locally via file://
+  if (!('caches' in window)) {
+    console.log(`[File Mode] Bypassing cache for ${cacheKey}`);
+    return new Promise((resolve, reject) => {
+      const s    = document.createElement('script');
+      s.src      = url;
+      s.onload   = resolve;
+      s.onerror  = () => reject(new Error(`Script exec failed: ${cacheKey}`));
+      document.head.appendChild(s);
+    });
+  }
+
+  const cache = await caches.open(CACHE_NAME);
+  let response = await cache.match(cacheKey);
+
+  if (response) {
+    console.log(`[Cache] HIT: ${cacheKey}`);
+  } else {
+    console.log(`[Cache] MISS: fetching ${cacheKey} from CDN...`);
+    response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch ${url}`);
+    // Save to cache
+    await cache.put(cacheKey, response.clone());
+    console.log(`[Cache] Saved: ${cacheKey}`);
+  }
+
+  const blob    = await response.blob();
+  const blobURL = URL.createObjectURL(blob);
+
+  return new Promise((resolve, reject) => {
+    const s    = document.createElement('script');
+    s.src      = blobURL;
+    s.onload   = () => { URL.revokeObjectURL(blobURL); resolve(); };
+    s.onerror  = () => reject(new Error(`Script exec failed: ${cacheKey}`));
+    document.head.appendChild(s);
+  });
+}
+
+// ═══════════════════════════════════════════════
+//  STEP 2: Load ferrari.glb — cache first, file fallback
+// ═══════════════════════════════════════════════
+async function loadGLB() {
+  // FIX: Bypass Cache API if running locally via file://
+  if (!('caches' in window)) {
+    console.log('[File Mode] Bypassing cache for ferrari.glb');
+    showBanner('⚠️ Cache disabled (Local File). Loading directly...', 'rgba(200,100,0,0.9)');
+    return 'ferrari.glb'; // Return direct path
+  }
+
+  const cache  = await caches.open(CACHE_NAME);
+  const cached = await cache.match('ferrari.glb');
+
+  if (cached) {
+    console.log('[Cache] HIT: ferrari.glb');
+    const blob    = await cached.blob();
+    const blobURL = URL.createObjectURL(blob);
+    showBanner('⚡ Ferrari from cache (offline mode)', 'rgba(180,100,0,0.9)');
+    return blobURL;
+  }
+
+  // Not in cache — try fetching from folder
+  console.log('[Cache] MISS: fetching ferrari.glb from folder...');
+  setHUD('🔄 Fetching Ferrari model...');
+
+  const response = await fetch('ferrari.glb');
+  if (!response.ok) throw new Error('ferrari.glb not found in folder');
+
+  const blob = await response.blob();
+
+  // Save to cache for offline use
+  await cache.put('ferrari.glb', new Response(blob.slice(0), {
+    headers: { 'Content-Type': 'model/gltf-binary' }
+  }));
+  showBanner('✅ Ferrari cached — works offline now!');
+  console.log('[Cache] Saved: ferrari.glb');
+
+  return URL.createObjectURL(blob);
+}
+
+// ═══════════════════════════════════════════════
+//  MAIN BOOT
+// ═══════════════════════════════════════════════
+async function boot() {
+  try {
+    // Load Three.js + GLTFLoader (from cache or CDN)
+    setHUD('⏳ Loading Three.js...');
+    for (const s of CDN_SCRIPTS) {
+      await loadScript(s.url, s.key);
+    }
+
+    // Load the GLB (from cache or folder)
+    setHUD('⏳ Loading Ferrari model...');
+    let glbURL;
+    try {
+      glbURL = await loadGLB();
+    } catch (e) {
+      setHUD(
+        '❌ ferrari.glb not found or blocked.\n\n' +
+        'Place ferrari.glb in the same folder.\n' +
+        '(Note: Chrome may block local 3D files on file:// URLs)'
+      );
+      return;
+    }
+
+    // Everything ready — start the game
+    initScene(glbURL);
+
+  } catch (err) {
+    console.error('[Boot]', err);
+    setHUD(
+      '❌ Failed to load Three.js.\n\n' +
+      'You need internet for the FIRST load only.\n' +
+      'After that everything works offline.'
+    );
+  }
+}
+
+boot();
+
+// ═══════════════════════════════════════════════
+//  INIT SCENE (called after scripts are ready)
+// ═══════════════════════════════════════════════
+function initScene(glbURL) {
+
+  // Show controls panel
+  document.getElementById('sensitivity-box').style.display = 'block';
+
+  // --- SCENE ---
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  scene.fog = new THREE.Fog(0x87ceeb, 3000, 20000);
+
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 99999);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.2;
+  document.body.appendChild(renderer.domElement);
+
+  // --- LIGHTS ---
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const sun = new THREE.DirectionalLight(0xffffff, 2);
+  sun.position.set(1000, 2000, 1000);
+  sun.castShadow = true;
+  sun.shadow.mapSize.width  = 2048;
+  sun.shadow.mapSize.height = 2048;
+  sun.shadow.camera.near   = 0.5;
+  sun.shadow.camera.far    = 50000;
+  sun.shadow.camera.left   = -5000;
+  sun.shadow.camera.right  =  5000;
+  sun.shadow.camera.top    =  5000;
+  sun.shadow.camera.bottom = -5000;
+  scene.add(sun);
+
+  // --- GROUND ---
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(100000, 100000),
+    new THREE.MeshStandardMaterial({ color: 0x228822, roughness: 1 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -3;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // --- ROAD ---
+  const road = new THREE.Mesh(
+    new THREE.PlaneGeometry(600, 40000),
+    new THREE.MeshStandardMaterial({
+      color: 0x111111, roughness: 0.9,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1
+    })
+  );
+  road.rotation.x = -Math.PI / 2;
+  scene.add(road);
+
+  for (let i = -20000; i < 20000; i += 300) {
+    const line = new THREE.Mesh(
+      new THREE.PlaneGeometry(15, 120),
+      new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
+      })
+    );
+    line.rotation.x = -Math.PI / 2;
+    line.position.set(0, 0, i);
+    scene.add(line);
+  }
+
+  // --- TREES ---
+  for (let i = 0; i < 150; i++) {
+    const side = Math.random() > 0.5 ? 1 : -1;
+    const x = side * (400 + Math.random() * 3000);
+    const z = (Math.random() - 0.5) * 40000;
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(8, 12, 80, 6),
+      new THREE.MeshStandardMaterial({ color: 0x3d2b1f })
+    );
+    trunk.position.set(x, 40, z);
+    trunk.castShadow = true;
+    scene.add(trunk);
+    const leaves = new THREE.Mesh(
+      new THREE.ConeGeometry(60, 120, 7),
+      new THREE.MeshStandardMaterial({ color: 0x116611 })
+    );
+    leaves.position.set(x, 150, z);
+    leaves.castShadow = true;
+    scene.add(leaves);
+  }
+
+  // --- SENSITIVITY ---
+  let turnSensitivity  = 0.028;
+  let accelSensitivity = 0.35;
+  let cameraDistance   = 600;
+  let mouseSensitivity = 0.003;
+
+  document.getElementById('turnSlider').addEventListener('input', e => {
+    turnSensitivity = e.target.value * 0.007;
+    document.getElementById('turnVal').innerText = e.target.value;
+  });
+  document.getElementById('accelSlider').addEventListener('input', e => {
+    accelSensitivity = e.target.value * 0.09;
+    document.getElementById('accelVal').innerText = e.target.value;
+  });
+  document.getElementById('camSlider').addEventListener('input', e => {
+    cameraDistance = parseInt(e.target.value);
+    document.getElementById('camVal').innerText = e.target.value;
+  });
+  document.getElementById('mouseSlider').addEventListener('input', e => {
+    mouseSensitivity = e.target.value * 0.001;
+    document.getElementById('mouseVal').innerText = e.target.value;
+  });
+  window.addEventListener('wheel', e => {
+    cameraDistance = Math.min(2000, Math.max(150, cameraDistance + e.deltaY * 0.5));
+    document.getElementById('camSlider').value = cameraDistance;
+    document.getElementById('camVal').innerText = Math.round(cameraDistance);
+  });
+
+  // --- MOUSE LOOK ---
+  let cameraYaw = Math.PI, cameraPitch = 0.4, isPointerLocked = false;
+
+  document.getElementById('lockBtn').addEventListener('click', () => {
+    renderer.domElement.requestPointerLock();
+  });
+  document.addEventListener('pointerlockchange', () => {
+    isPointerLocked = document.pointerLockElement === renderer.domElement;
+    document.getElementById('lockBtn').innerText = isPointerLocked
+      ? '🔒 Locked - ESC to unlock'
+      : '🖱️ Click to look around';
+  });
+  document.addEventListener('mousemove', e => {
+    if (!isPointerLocked) return;
+    cameraYaw   -= e.movementX * mouseSensitivity;
+    cameraPitch -= e.movementY * mouseSensitivity;
+    cameraPitch  = Math.min(1.4, Math.max(0.05, cameraPitch));
+  });
+
+  // --- CAR STATE ---
+  let carModel = null, frontWheelData = [], rearWheelData = [], rearSpinAngles = [];
+  let currentSpeed = 0, carRotation = 0, steerAngle = 0, targetSteer = 0;
+
+  const maxSpeed = 25, maxReverseSpeed = -10, brakeForce = 0.5;
+  const coasting = 0.2, maxSteer = 0.45, steerSpeed = 0.04;
+
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    if (['w','a','s','d',' '].includes(e.key.toLowerCase())) e.preventDefault();
+  });
+  window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  // --- BUILD CAR ---
+  function buildCar(gltf) {
+    carModel = new THREE.Group();
+    const model = gltf.scene;
+
+    const box    = new THREE.Box3().setFromObject(model);
+    const size   = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    model.position.set(-center.x, -box.min.y, -center.z);
+    model.scale.setScalar(200 / Math.max(size.x, size.y, size.z));
+
+    model.traverse(child => {
+      if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
+    });
+
+    const wheelCandidates = [];
+    model.traverse(child => {
+      if (child.isMesh) {
+        const n = child.name.toLowerCase();
+        if (n.includes("tyre") || n.includes("wheel") || n.includes("rotor"))
+          wheelCandidates.push(child);
+      }
+    });
+
+    let maxZ = -Infinity, minZ = Infinity;
+    wheelCandidates.forEach(w => {
+      const wp = new THREE.Vector3();
+      w.getWorldPosition(wp);
+      if (wp.z > maxZ) maxZ = wp.z;
+      if (wp.z < minZ) minZ = wp.z;
+    });
+    const midZ = (maxZ + minZ) / 2;
+
+    frontWheelData = []; rearWheelData = []; rearSpinAngles = [];
+
+    wheelCandidates.forEach(w => {
+      const n  = w.name.toLowerCase();
+      const wp = new THREE.Vector3();
+      w.getWorldPosition(wp);
+
+      const namedFront = n.includes("tyre1") || n.includes("wheel1") || n.includes("rotor1");
+      const namedRear  = n.includes("tyre2") || n.includes("wheel2") || n.includes("rotor2");
+      const isFront    = namedFront || (!namedRear && wp.z > midZ);
+      const isLeftSide = wp.x < 0;
+
+      if (isFront) {
+        const hub = new THREE.Object3D();
+        hub.position.copy(w.position);
+        w.parent.add(hub);
+        w.parent.remove(w);
+        hub.add(w);
+        w.position.set(0, 0, 0);
+        frontWheelData.push({ steerHub: hub, spinMesh: w, isLeftSide });
+      } else {
+        rearWheelData.push(w);
+        rearSpinAngles.push(0);
+      }
+    });
+
+    carModel.add(model);
+    scene.add(carModel);
+    setHUD(`✅ Ferrari ready!\nFront: ${frontWheelData.length} | Rear: ${rearWheelData.length}`);
+  }
+
+  // --- LOAD GLB ---
+  const glbLoader = new THREE.GLTFLoader();
+  glbLoader.load(
+    glbURL,
+    (gltf) => { 
+      buildCar(gltf); 
+      // Only revoke URL if we created a Blob URL (not a direct string)
+      if (glbURL.startsWith('blob:')) URL.revokeObjectURL(glbURL); 
+    },
+    (p) => { if (p.total > 0) setHUD(`Loading Ferrari... ${Math.round(p.loaded / p.total * 100)}%`); },
+    (err) => {
+      console.error(err);
+      setHUD('❌ Failed to parse Ferrari model.\n(Check browser console if on file://)');
+    }
+  );
+
+  // --- ANIMATION LOOP ---
+  const spinAxis = new THREE.Vector3(1, 0, 0);
+  const spinQuat = new THREE.Quaternion();
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    if (carModel) {
+      if (keys['w']) {
+        currentSpeed += accelSensitivity;
+        if (currentSpeed > maxSpeed) currentSpeed = maxSpeed;
+      } else if (keys['s']) {
+        currentSpeed -= brakeForce;
+        if (currentSpeed < maxReverseSpeed) currentSpeed = maxReverseSpeed;
+      } else {
+        if (currentSpeed > 0) { currentSpeed -= coasting; if (currentSpeed < 0) currentSpeed = 0; }
+        if (currentSpeed < 0) { currentSpeed += coasting; if (currentSpeed > 0) currentSpeed = 0; }
+      }
+
+      if (keys['a'])      targetSteer =  maxSteer;
+      else if (keys['d']) targetSteer = -maxSteer;
+      else                targetSteer =  0;
+
+      if (steerAngle < targetSteer) { steerAngle += steerSpeed; if (steerAngle > targetSteer) steerAngle = targetSteer; }
+      else if (steerAngle > targetSteer) { steerAngle -= steerSpeed; if (steerAngle < targetSteer) steerAngle = targetSteer; }
+
+      if (Math.abs(currentSpeed) > 0.3)
+        carRotation += (steerAngle / maxSteer) * turnSensitivity * (currentSpeed / maxSpeed);
+
+      carModel.rotation.y  = carRotation;
+      carModel.position.x += Math.sin(carRotation) * currentSpeed;
+      carModel.position.z += Math.cos(carRotation) * currentSpeed;
+
+      const spinAmount = currentSpeed * 0.012;
+
+      frontWheelData.forEach(({ steerHub, spinMesh, isLeftSide }) => {
+        steerHub.rotation.y = isLeftSide ? -steerAngle : steerAngle;
+        const s = (spinMesh.userData.spinAngle || 0) + spinAmount;
+        spinMesh.userData.spinAngle = s;
+        spinQuat.setFromAxisAngle(spinAxis, s);
+        spinMesh.quaternion.copy(spinQuat);
+      });
+
+      rearWheelData.forEach((w, i) => {
+        rearSpinAngles[i] += spinAmount;
+        spinQuat.setFromAxisAngle(spinAxis, rearSpinAngles[i]);
+        w.quaternion.copy(spinQuat);
+      });
+
+      const camX = carModel.position.x + cameraDistance * Math.sin(cameraPitch) * Math.sin(cameraYaw + carRotation);
+      const camY = carModel.position.y + cameraDistance * Math.cos(cameraPitch);
+      const camZ = carModel.position.z + cameraDistance * Math.sin(cameraPitch) * Math.cos(cameraYaw + carRotation);
+      camera.position.lerp(new THREE.Vector3(camX, camY, camZ), 0.08);
+      camera.lookAt(carModel.position.x, carModel.position.y + 60, carModel.position.z);
+
+      const dir      = currentSpeed >  0.5 ? "▲ FORWARD" : currentSpeed < -0.5 ? "▼ REVERSE" : "■ STOPPED";
+      const steerDir = steerAngle   >  0.05 ? "◀ LEFT"   : steerAngle   < -0.05 ? "RIGHT ▶"   : "● STRAIGHT";
+      setHUD(
+        `Speed:  ${Math.abs(currentSpeed * 10).toFixed(0)} km/h  ${dir}\n` +
+        `Steer:  ${steerDir}\n` +
+        `W=drive  S=brake  A=left  D=right`
+      );
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  animate();
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+}
+</script>
+</body>
+</html>
